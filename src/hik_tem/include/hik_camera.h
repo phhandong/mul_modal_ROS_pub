@@ -1,78 +1,30 @@
-#ifndef _HIK_CAMERA_H_
-#define _HIK_CAMERA_H_
-
-#include <stdio.h>
-#include <iostream>
-
-#include <ros/ros.h>
-#include <sensor_msgs/Image.h>
-#include <opencv2/opencv.hpp>
-#include <cv_bridge/cv_bridge.h>
-#include <image_transport/image_transport.h>
-#include <camera_info_manager/camera_info_manager.h>
-#include <sensor_msgs/SetCameraInfo.h>
-#include <camera_calibration_parsers/parse.h>
-
+#pragma once
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <message_interface/msg/p2_p_data.hpp>
+#include <message_interface/msg/ptz_ctrl.hpp>
+#include <vector>
 #include "hik_sdk/HCNetSDK.h"
-#include "hik_sdk/plaympeg4.h"
-#include "message_interface/PtzCtrl.h"
-#include "message_interface/P2PData.h"
 
-using namespace std;
-
-class HikCamera{
-
-    public:
-        ~HikCamera();
-        void run();
-    private:
-        /// ros parameters
-        ros::Publisher p2p_data_pub;
-        ros::Subscriber ptz_ctrl;
-        ros::Timer timer;
-        
-        /// camera parameters
-        int image_width;
-        int image_height;
-
-        std::string ip_addr;
-        std::string usr_name;
-        std::string password;
-        std::string frame_id;
-        std::string camera_name;
-        std::string camera_info_url;
-
-        int port;
-        int channel;
-        int link_mode;
-
-        LONG user_id;
-        
-        NET_DVR_JPEGPICTURE_WITH_APPENDDATA struJpegWithAppendAata = { 0 };
-
-        void PtzCtrlCallback(const message_interface::PtzCtrl::ConstPtr& msg);
-        void P2PDataCollet(const ros::TimerEvent& e);
-
-        bool initHikSDK();
-        bool initThemCam();
-        void initROSIO(ros::NodeHandle& priv_node);
-
-        static int dec_to_hex(int param){
-            int out = 0 , ind = 0;
-            char buf[10] = {0};
-            while(param){
-                buf[ind] = param%10;
-                ind++;
-                param /= 10;
-            }
-            for(int i=ind-1;i>=0;i--){
-                out = out *16 + buf[i];
-            }
-            return out;
-        }
-
+class HikCamera final : public rclcpp::Node {
+ public:
+  HikCamera();
+  ~HikCamera() override;
+ private:
+  bool login();
+  void capture();
+  void publish_jpeg(const std::vector<char>& bytes, const std::string& topic_frame, const rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& publisher);
+  void on_ptz(const message_interface::msg::PtzCtrl::SharedPtr msg);
+  LONG user_id_{-1};
+  std::string ip_, username_, password_, password_env_, profile_;
+  int port_{8000}, mono_channel_{1}, visible_channel_{1}, thermal_channel_{2}, jpeg_quality_{90};
+  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr mono_pub_, visible_pub_, thermal_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr temperature_pub_;
+  rclcpp::Publisher<message_interface::msg::P2PData>::SharedPtr p2p_pub_;
+  rclcpp::Subscription<message_interface::msg::PtzCtrl>::SharedPtr ptz_sub_;
+  std::vector<char> jpeg_buffer_ = std::vector<char>(16 * 1024 * 1024);
+  std::vector<char> visible_buffer_ = std::vector<char>(16 * 1024 * 1024);
+  std::vector<char> p2p_buffer_ = std::vector<char>(16 * 1024 * 1024);
 };
-
-
-
-#endif // _HIK_CAMERA_H_

@@ -1,85 +1,69 @@
-#include <message_filters/subscriber.h>
-#include <message_filters/synchronizer.h>
-#include <message_filters/sync_policies/approximate_time.h>
-#include <message_filters/sync_policies/exact_time.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <sensor_msgs/CompressedImage.h>
-#include <ros/ros.h>
-#include <iostream>
-#include <pcl_conversions/pcl_conversions.h>
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <memory>
+#include <string>
+#include <stdexcept>
+#include <vector>
+
 #include <pcl/filters/filter.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
-using namespace std;
-using namespace sensor_msgs;
-using namespace message_filters;
+class MessageSynchronizer final : public rclcpp::Node {
+ public:
+  MessageSynchronizer() : Node("mess_sync") {
+    camera_topics_ = declare_parameter<std::vector<std::string>>(
+      "camera_topics", {"/hik_mono/image/compressed", "/hik_bispectral/visible/image/compressed", "/hik_bispectral/thermal/image/compressed"});
+    output_topics_ = declare_parameter<std::vector<std::string>>(
+      "output_topics", {"/compressedimg1", "/compressedimg2", "/compressedimg3"});
+    cloud_topic_ = declare_parameter<std::string>("cloud_topic", "/rslidar_points");
+    output_cloud_topic_ = declare_parameter<std::string>("output_cloud_topic", "/pointcloud");
+    max_delta_ns_ = static_cast<int64_t>(declare_parameter<double>("max_delta_sec", 0.10) * 1e9);
+    if (camera_topics_.empty() || camera_topics_.size() > 4 || camera_topics_.size() != output_topics_.size()) {
+      throw std::runtime_error("camera_topics and output_topics must contain the same 1..4 entries");
+    }
 
-ros::Publisher Img_info_pub1, Img_info_pub2, Img_info_pub3, Img_info_pub4;
-ros::Publisher PC_info_pub;
+    const auto sensor_qos = rclcpp::SensorDataQoS();
+    latest_images_.resize(camera_topics_.size());
+    for (size_t i = 0; i < camera_topics_.size(); ++i) {
+      image_publishers_.push_back(create_publisher<sensor_msgs::msg::CompressedImage>(output_topics_[i], sensor_qos));
+      image_subscriptions_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
+        camera_topics_[i], sensor_qos, [this, i](sensor_msgs::msg::CompressedImage::ConstSharedPtr msg) { latest_images_[i] = std::move(msg); }));
+    }
+    cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(output_cloud_topic_, sensor_qos);
+    cloud_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      cloud_topic_, sensor_qos, std::bind(&MessageSynchronizer::on_cloud, this, std::placeholders::_1));
+  }
 
-void callback(const sensor_msgs::PointCloud2::ConstPtr& ori_pointcloud, const sensor_msgs::CompressedImage::ConstPtr& ori_img1,
-              const sensor_msgs::CompressedImage::ConstPtr& ori_img2, const sensor_msgs::CompressedImage::ConstPtr& ori_img3,
-              const sensor_msgs::CompressedImage::ConstPtr& ori_img4)
-{
-  // 指针转为msg
-  sensor_msgs::PointCloud2 syn_pointcloud = *ori_pointcloud;
-  sensor_msgs::CompressedImage syn_img1 = *ori_img1;
-  sensor_msgs::CompressedImage syn_img2 = *ori_img2;
-  sensor_msgs::CompressedImage syn_img3 = *ori_img3;
-  sensor_msgs::CompressedImage syn_img4 = *ori_img4;
-  // 打印结果
-  cout << "syn velodyne points‘ timestamp : " << syn_pointcloud.header.stamp << endl;
-  cout << "syn Img1‘s timestamp : " << syn_img1.header.stamp << endl;
-  cout << "syn Img2‘s timestamp : " << syn_img2.header.stamp << endl;
-  cout << "syn Img3‘s timestamp : " << syn_img3.header.stamp << endl;
-  cout << "syn Img4‘s timestamp : " << syn_img4.header.stamp << endl;
+ private:
+  void on_cloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& cloud_msg) {
+    for (const auto& image : latest_images_) {
+      if (!image || std::llabs((rclcpp::Time(image->header.stamp) - rclcpp::Time(cloud_msg->header.stamp)).nanoseconds()) > max_delta_ns_) return;
+    }
+    pcl::PointCloud<pcl::PointXYZI> cloud;
+    pcl::fromROSMsg(*cloud_msg, cloud);
+    std::vector<int> indices;
+    pcl::removeNaNFromPointCloud(cloud, cloud, indices);
+    sensor_msgs::msg::PointCloud2 filtered;
+    pcl::toROSMsg(cloud, filtered);
+    filtered.header = cloud_msg->header;
+    cloud_publisher_->publish(filtered);
+    for (size_t i = 0; i < latest_images_.size(); ++i) image_publishers_[i]->publish(*latest_images_[i]);
+  }
 
-  // 发送话题
-  Img_info_pub1.publish(syn_img1);
-  Img_info_pub2.publish(syn_img2);
-  Img_info_pub3.publish(syn_img3);
-  Img_info_pub4.publish(syn_img4);
+  std::vector<std::string> camera_topics_, output_topics_;
+  std::string cloud_topic_, output_cloud_topic_;
+  int64_t max_delta_ns_{};
+  std::vector<sensor_msgs::msg::CompressedImage::ConstSharedPtr> latest_images_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> image_subscriptions_;
+  std::vector<rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr> image_publishers_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_publisher_;
+};
 
-
-  // 去除NAN
-  pcl::PointCloud<pcl::PointXYZI>* cloud = new pcl::PointCloud<pcl::PointXYZI>;
-  pcl::fromROSMsg(*ori_pointcloud, *cloud);
-
-  std::vector<int> mapping;
-  pcl::removeNaNFromPointCloud(*cloud, *cloud, mapping);
-
-  sensor_msgs::PointCloud2 out_pointcloud;
-  pcl::toROSMsg(*cloud, out_pointcloud);
-
-  PC_info_pub.publish(out_pointcloud);
-}
-
-
-int main(int argc, char** argv)
-{
-  // 初始化节点
-  ros::init(argc, argv, "msg_synchronizer");
-  ros::NodeHandle nh;
-  // 初始化发布话题
-  Img_info_pub1 = nh.advertise<sensor_msgs::CompressedImage>("/compressedimg1",10);
-  Img_info_pub2 = nh.advertise<sensor_msgs::CompressedImage>("/compressedimg2",10);
-  Img_info_pub3 = nh.advertise<sensor_msgs::CompressedImage>("/compressedimg3",10);
-  Img_info_pub4 = nh.advertise<sensor_msgs::CompressedImage>("/compressedimg4",10);
-  PC_info_pub = nh.advertise<sensor_msgs::PointCloud2>("/pointcloud",10);
-  // 初始化消息订阅者
-  message_filters::Subscriber<CompressedImage> camera_sub1(nh, "/hik_cam_node_1/hik_camera/compressed", 1);
-  message_filters::Subscriber<CompressedImage> camera_sub2(nh, "/hik_cam_node_2/hik_camera/compressed", 1);
-  message_filters::Subscriber<CompressedImage> camera_sub3(nh, "/hik_cam_node_3/hik_camera/compressed", 1);
-  message_filters::Subscriber<CompressedImage> camera_sub4(nh, "/hik_cam_node_4/hik_camera/compressed", 1);
-  message_filters::Subscriber<PointCloud2> velodyne_sub(nh, "/rslidar_points", 1);
-  // 初始化同步消息规则
-  typedef sync_policies::ApproximateTime<PointCloud2, CompressedImage, CompressedImage, CompressedImage, CompressedImage> MySyncPolicy;
-  // 消息同步与回调   
-  Synchronizer<MySyncPolicy> sync(MySyncPolicy(10), velodyne_sub, camera_sub1, camera_sub2, camera_sub3, camera_sub4); //queue size=10
-  sync.registerCallback(boost::bind(&callback, _1, _2, _3, _4, _5));
-
-  ros::spin();
-  return 0;
-}
-
+int main(int argc, char** argv) { rclcpp::init(argc, argv); rclcpp::spin(std::make_shared<MessageSynchronizer>()); rclcpp::shutdown(); }

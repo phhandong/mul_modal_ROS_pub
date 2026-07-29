@@ -4,3 +4,22 @@
 /data
 *.bag
 /ros2imgAndpcd/data
+/install
+/log
+/.venv
+*.local.yaml
+
+# Python caches and local tooling state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+
+# Generated sensor data and visualization outputs
+*.mcap
+*.db3
+*.pcd
+*.mp4
+*.avi

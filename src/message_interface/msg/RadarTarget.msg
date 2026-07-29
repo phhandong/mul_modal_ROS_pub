@@ -1,1 +1,2 @@
-float32 pitch
+std_msgs/Header header
+float32 bearing_deg

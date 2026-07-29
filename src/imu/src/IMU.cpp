@@ -1,231 +1,52 @@
 #include "IMU.h"
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <array>
+#include <cstring>
+#include <rapidjson/document.h>
 
-
-Imu::Imu() {}
-
-bool Imu::initROSIO(ros::NodeHandle& priv_node)
-{
-    /// imu parameter
-    priv_node.param<std::string>("ip_addr", ip_addr,"192.168.5.100");
-    ROS_INFO("ip address:\t%s", ip_addr.c_str());
-
-    priv_node.param<int>("port",port, 8000);
-    ROS_INFO("port:      \t%d", port);
-    
-    // turn it to network byte order
-    in_addr_t ip_addr_n = inet_addr(ip_addr.c_str());
-    if (ip_addr_n == INADDR_NONE) {
-        std::cerr << "Invalid IP address: " << ip_addr_n << std::endl;
-        return false;
-    }
-    in_port_t port_n = htons(port);
-    
-    // bind socket and init publisher
-    if(initIMU(ip_addr_n, port_n))
-    {
-        ROS_INFO("initIMU success");
-        pub_ship = priv_node.advertise<message_interface::Ownship>("/ownship",10);
-        pub_env = priv_node.advertise<message_interface::EnvData>("/envdata",10);
-        timer = priv_node.createTimer(ros::Duration(0.01), &Imu::readUdpPendingDatagrams, this, false, true);
-        return true;
-    }
-    else
-    {
-        ROS_INFO("initIMU fail");
-        return false;
-    }
+namespace {
+float number(const rapidjson::Value& obj, const char* key, float fallback = 0.0F) {
+  if (!obj.HasMember(key)) return fallback;
+  const auto& value = obj[key];
+  if (value.IsNumber()) return value.GetFloat();
+  if (value.IsString()) { try { return std::stof(value.GetString()); } catch (...) {} }
+  return fallback;
+}
+uint32_t uint_number(const rapidjson::Value& obj, const char* key) { return obj.HasMember(key) && obj[key].IsUint() ? obj[key].GetUint() : 0U; }
+std::string text(const rapidjson::Value& obj, const char* key) { return obj.HasMember(key) && obj[key].IsString() ? obj[key].GetString() : ""; }
 }
 
-bool Imu::initIMU(in_addr_t ip_addr_n, in_port_t port_n)
-{
-    // Create UDP socket
-    if (_socket == -1) {
-        _socket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (_socket == -1) {
-            ROS_INFO("Failed to create socket");
-            return false;
-        }
-    }
-
-    int reuse = 1;
-    if (setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR,
-                   (char *)&reuse, sizeof(reuse)) < 0) {
-      ROS_INFO("setting SO_REUSEADDR");
-      close(_socket);
-      return false;
-    }
-
-    // Bind to the server address
-    // on this port, receives ALL multicast groups
-    memset(&addr, 0, sizeof(addr));
-
-    addr.sin_family = AF_INET;       // Use IPV4
-    addr.sin_port   = port_n;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    if(bind(_socket, (struct sockaddr*)&addr, sizeof(addr)) == -1){
-        ROS_INFO("Failed to bind socket on port");
-        close(_socket);
-        return false;
-    }
-    
-    // Tell the operating system to add the socket to the multicast group
-    // on all interfaces. 
-    struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = ip_addr_n;
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    if(setsockopt(_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
-                    (char *)&mreq, sizeof(mreq)) < 0){
-        ROS_INFO("setsockopt failed !");
-        close(_socket);
-        return false;
-    }else
-    {
-        ROS_INFO("setsockopt success!");
-    }
-
-
-    // loop until IMU is found
-    char buf[BUFF_LEN];
-    memset(buf, 0, BUFF_LEN);
-
-    socklen_t len = sizeof(addr);
-    while(true)
-    {
-        int ret = recvfrom(_socket, buf, BUFF_LEN, 0, 
-                            (struct sockaddr*)&addr, &len);
-        if(ret > 300){
-            ROS_INFO("IMU found");
-            break;
-        }
-    }
-
-    // Set the socket to non-blocking mode
-    int flags = fcntl(_socket, F_GETFL, 0);
-    fcntl(_socket, F_SETFL, flags | O_NONBLOCK);
-    
-    return true;   
+Imu::Imu() : Node("imu") {
+  multicast_group_ = declare_parameter<std::string>("multicast_group", "230.168.50.16");
+  port_ = declare_parameter<int>("port", 20000);
+  ownship_pub_ = create_publisher<message_interface::msg::Ownship>("/ownship", 10);
+  env_pub_ = create_publisher<message_interface::msg::EnvData>("/envdata", 10);
+  if (open_socket()) timer_ = create_wall_timer(std::chrono::milliseconds(10), std::bind(&Imu::poll, this));
 }
-
-
-void Imu::readUdpPendingDatagrams(const ros::TimerEvent& event)
-{
-    
-    memset(buffer, 0, BUFF_LEN);
-
-    socklen_t len = sizeof(addr);
-    int ret = recvfrom(_socket, buffer, BUFF_LEN, 0, 
-                            (struct sockaddr*)&addr, &len);
-
-    if (ret > 0){
-        parse(buffer);
-    }
-
+Imu::~Imu() { if (socket_ >= 0) close(socket_); }
+bool Imu::open_socket() {
+  socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_ < 0) { RCLCPP_ERROR(get_logger(), "Unable to create UDP socket"); return false; }
+  int reuse = 1; setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(static_cast<uint16_t>(port_)); address.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) { RCLCPP_ERROR(get_logger(), "Cannot bind UDP port %d", port_); close(socket_); socket_ = -1; return false; }
+  ip_mreq request{}; request.imr_multiaddr.s_addr = inet_addr(multicast_group_.c_str()); request.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (request.imr_multiaddr.s_addr == INADDR_NONE || setsockopt(socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request, sizeof(request)) < 0) { RCLCPP_ERROR(get_logger(), "Cannot join multicast group %s", multicast_group_.c_str()); close(socket_); socket_ = -1; return false; }
+  fcntl(socket_, F_SETFL, fcntl(socket_, F_GETFL, 0) | O_NONBLOCK);
+  return true;
 }
-
-void Imu::parse(char *buffer)
-{
-    // Parse data to JSON and Publish data
-    std::string str_b = buffer;
-    rapidjson::Document doc;
-    doc.Parse(str_b.c_str());
-
-    if (doc.HasParseError()){
-        ROS_INFO("GetJsonData ParseError");
-        return;
-    }
-    std::string dataTypeStr = doc["DataType"].GetString();
-    if (dataTypeStr == "OwnShip"){
-        parseOwnShip(doc);
-    }
-    else if (dataTypeStr == "EnvirData"){
-        parseEnvData(doc);
-    }
-    ROS_INFO("Stream CallBack, IMU DATA IS RECEIVED.");
+void Imu::poll() { std::array<char, 8192> buffer{}; for (;;) { const auto len = recv(socket_, buffer.data(), buffer.size(), 0); if (len <= 0) break; parse(buffer.data(), static_cast<size_t>(len)); } }
+void Imu::parse(const char* data, size_t length) {
+  rapidjson::Document doc; doc.Parse(data, length);
+  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("DataType") || !doc["DataType"].IsString() || !doc.HasMember("content") || !doc["content"].IsObject()) { RCLCPP_WARN(get_logger(), "Discarded malformed IMU JSON datagram"); return; }
+  const auto stamp = now(); const auto type = text(doc, "DataType"); const auto& c = doc["content"];
+  if (type == "OwnShip") {
+    message_interface::msg::Ownship msg; msg.header.stamp = stamp; msg.data_type = type; msg.date_time = text(doc, "DateTime"); msg.mmsi = uint_number(doc, "MMSI");
+    msg.cog=number(c,"cog"); msg.draft=number(c,"draft"); msg.ground_mile_all=number(c,"groundMileAll"); msg.ground_mile_clean=number(c,"groundMileClean"); msg.head=number(c,"head"); msg.head_ratio=number(c,"headRatio"); msg.latitude=number(c,"lat"); msg.longitude=number(c,"lon"); msg.pitch=number(c,"pitch"); msg.pitch_ratio=number(c,"pitchRatio"); msg.roll=number(c,"roll"); msg.roll_ratio=number(c,"rollRatio"); msg.sea_depth=number(c,"seaDepth"); msg.sog=number(c,"sog"); msg.sog_x=number(c,"sogX"); msg.sog_y=number(c,"sogY"); msg.stw=number(c,"stw"); msg.stw_x=number(c,"stwX"); msg.stw_y=number(c,"stwY"); msg.water_mile_all=number(c,"waterMileAll"); msg.water_mile_clean=number(c,"waterMileClean"); ownship_pub_->publish(msg);
+  } else if (type == "EnvirData") {
+    message_interface::msg::EnvData msg; msg.header.stamp=stamp; msg.data_type=type; msg.date_time=text(doc,"DateTime"); msg.mmsi=uint_number(doc,"MMSI"); msg.current_ang=number(c,"CurrentAng"); msg.current_spd=number(c,"CurrentSpd"); msg.fog_mod=static_cast<uint8_t>(number(c,"FogMod")); msg.rain_mod=static_cast<uint8_t>(number(c,"RainMod")); msg.snow_mod=static_cast<uint8_t>(number(c,"SnowMod")); msg.surge_ang=number(c,"SurgeAng"); msg.surge_height=number(c,"SurgeHeight"); msg.surge_period=number(c,"SurgePeirod"); msg.water_depth=number(c,"WaterDeep"); msg.wave_height_sea=number(c,"WaveHeightSea"); msg.wave_height_wind=number(c,"WaveHeightWind"); msg.wave_period=number(c,"WavePeirod"); msg.wind_ang_a=number(c,"WindAngA"); msg.wind_ang_r=number(c,"WindAngR"); msg.wind_spd_a=number(c,"WindSpdA"); msg.wind_spd_r=number(c,"WindSpdR"); env_pub_->publish(msg);
+  }
 }
-
-void Imu::parseOwnShip(rapidjson::Document& doc)
-{
-    message_interface::Ownship ownship;
-    // Parse data to JSON
-    ownship.DataType = doc["DataType"].GetString();
-    ownship.DateTime = doc["DateTime"].GetString();
-    ownship.MMSI = doc["MMSI"].GetInt();
-
-    const rapidjson::Value& content = doc["content"];
-
-    ownship.cog = content["cog"].GetFloat();
-    ownship.draft = content["draft"].GetFloat();
-    ownship.groundMileAll = content["groundMileAll"].GetFloat();
-    ownship.groundMileClean = content["groundMileClean"].GetFloat();
-    ownship.head = content["head"].GetFloat();
-    ownship.headRatio = content["headRatio"].GetFloat();
-    ownship.lat = std::stod(content["lat"].GetString());
-    ownship.lon = std::stod(content["lon"].GetString());
-    ownship.pitch = content["pitch"].GetFloat();
-    ownship.pitchRatio = content["pitchRatio"].GetFloat();
-    ownship.roll = content["roll"].GetFloat();
-    ownship.rollRatio = content["rollRatio"].GetFloat();
-    ownship.seaDepth = content["seaDepth"].GetFloat();
-    ownship.sog = content["sog"].GetFloat();
-    ownship.sogX = content["sogX"].GetFloat();
-    ownship.sogY = content["sogY"].GetFloat();
-    ownship.stw = content["stw"].GetFloat();
-    ownship.stwX = content["stwX"].GetFloat();
-    ownship.stwY = content["stwY"].GetFloat();
-    ownship.waterMileAll = content["waterMileAll"].GetFloat();
-    ownship.waterMileClean = content["waterMileClean"].GetFloat();
-
-    pub_ship.publish(ownship);
-
-}
-
-void Imu::parseEnvData(rapidjson::Document& doc)
-{
-    message_interface::EnvData envdata;
-
-    envdata.DataType = doc["DataType"].GetString();
-    envdata.DateTime = doc["DateTime"].GetString();
-    envdata.MMSI = doc["MMSI"].GetInt();
-
-    const rapidjson::Value& content = doc["content"];
-
-    envdata.CurrentAng = content["CurrentAng"].GetFloat();
-    envdata.CurrentSpd = content["CurrentSpd"].GetFloat();
-    envdata.FogMod = content["FogMod"].GetInt();
-    envdata.RainMod = content["RainMod"].GetInt();
-    envdata.SnowMod = content["SnowMod"].GetInt();
-    envdata.SurgeAng = content["SurgeAng"].GetFloat();
-    envdata.SurgeHeight = content["SurgeHeight"].GetFloat();
-    envdata.SurgePeirod = content["SurgePeirod"].GetFloat();
-    envdata.WaterDeep = content["WaterDeep"].GetFloat();
-    envdata.WaveHeightSea = content["WaveHeightSea"].GetFloat();
-    envdata.WaveHeightWind = content["WaveHeightWind"].GetFloat();
-    envdata.WavePeirod = content["WavePeirod"].GetFloat();
-    envdata.WindAngA = content["WindAngA"].GetFloat();
-    envdata.WindAngR = content["WindAngR"].GetFloat();
-    envdata.WindSpdA = content["WindSpdA"].GetFloat();
-    envdata.WindSpdR = content["WindSpdR"].GetFloat();
-
-    pub_env.publish(envdata);
-
-}
-
-
-void Imu::run()
-{
-    ros::NodeHandle priv_node("~");
-
-    if(initROSIO(priv_node))ros::spin();
-}
-
-int main(int argc, char** argv)
-{
-    ros::init(argc, argv, "imu");
-
-    Imu imu;
-    imu.run();
-
-    return 0;
-}
-
+int main(int argc, char** argv) { rclcpp::init(argc, argv); rclcpp::spin(std::make_shared<Imu>()); rclcpp::shutdown(); }

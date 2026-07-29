@@ -1,3 +1,3 @@
-int32 Pan
-int32 Tilt
-int32 Zoom
+float32 pan_deg
+float32 tilt_deg
+int32 zoom

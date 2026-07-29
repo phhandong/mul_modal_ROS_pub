@@ -1,15 +1,14 @@
-import pcl
-from rosbag.bag import Bag
-from pcl import PointCloud
-import os
-from tqdm import tqdm
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+import numpy as np
+from pcd_io import write_pcd
 
-pcd_files = os.listdir("./pointcloud/")
-pbar = tqdm(pcd_files)
-for name in pbar:
-    path = os.path.join("./pointcloud/", name)
-    new_path = ath = os.path.join("./pointcloud_ascii/", name)
-    pcd = pcl.load_pcd(path)
-    # 默认就是binary=False, 所以pcd将存储成为ascii格式的
-    pcl.save_pcd(new_path, pcd, binary=False)
-
+def read_binary_xyzi(path):
+    payload = path.read_bytes(); marker = b'DATA binary\n'; offset = payload.find(marker)
+    if offset < 0: raise ValueError(f'{path} is not a binary PCD')
+    return np.frombuffer(payload[offset + len(marker):], dtype='<f4').reshape((-1, 4))
+def main():
+    parser=argparse.ArgumentParser(); parser.add_argument('input_dir',type=Path); parser.add_argument('output_dir',type=Path); args=parser.parse_args()
+    for path in sorted(args.input_dir.glob('*.pcd')): write_pcd(args.output_dir/path.name, read_binary_xyzi(path), binary=False)
+if __name__=='__main__': main()

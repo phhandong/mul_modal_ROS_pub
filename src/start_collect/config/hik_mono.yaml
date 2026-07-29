@@ -1,0 +1,10 @@
+hik_mono:
+  ros__parameters:
+    profile: mono
+    ip: 0.0.0.0
+    username: admin
+    password_env: HIK_MONO_PASSWORD
+    port: 8000
+    mono_channel: 1
+    capture_rate_hz: 10.0
+    jpeg_quality: 90

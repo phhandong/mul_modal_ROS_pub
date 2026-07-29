@@ -1,53 +1,20 @@
-cmake_minimum_required(VERSION 3.5.0)
+cmake_minimum_required(VERSION 3.8)
 project(hik_tem)
-
-add_compile_options(-std=c++17)
-
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  cv_bridge
-  image_transport
-  camera_info_manager
-  std_msgs
-  rospy
-  message_interface
-)
-
-find_package(OpenCV 4 REQUIRED)
-include_directories(${OpenCV_INCLUDES})
-
-find_package(Boost REQUIRED)
-include_directories(${Boost_INCLUDES})
-
-
-catkin_package(
-  INCLUDE_DIRS include 
-  CATKIN_DEPENDS roscpp std_msgs rospy message_interface)
-
-
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-)
-
-link_directories(lib)
-
-add_library(hik_tem src/hik_camera.cpp)
-target_link_libraries(hik_tem
-    ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
-    hcnetsdk PlayCtrl
-)
-
-add_dependencies(hik_tem 
-                ${${message_interface}_EXPORTED_TARGETS}
-                ${catkin_EXPORTED_TARGETS} )
-
-
-add_executable(hik_camera_app src/hik_camera_app.cpp)
-target_link_libraries(hik_camera_app hik_tem)
-
-catkin_install_python(PROGRAMS
-  scripts/ptz_ctrl.py
- DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(message_interface REQUIRED)
+find_package(OpenCV REQUIRED)
+add_executable(hik_camera_node src/hik_camera.cpp)
+target_compile_features(hik_camera_node PUBLIC cxx_std_17)
+target_include_directories(hik_camera_node PRIVATE include ${OpenCV_INCLUDE_DIRS})
+target_link_directories(hik_camera_node PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+target_link_libraries(hik_camera_node hcnetsdk ${OpenCV_LIBS})
+ament_target_dependencies(hik_camera_node rclcpp sensor_msgs message_interface)
+target_link_libraries(hik_camera_node message_interface::message_interface__rosidl_typesupport_cpp)
+set_target_properties(hik_camera_node PROPERTIES INSTALL_RPATH "$ORIGIN/../hik_tem")
+install(TARGETS hik_camera_node DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/ptz_ctrl.py DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY lib/ DESTINATION lib/${PROJECT_NAME})
+ament_package()

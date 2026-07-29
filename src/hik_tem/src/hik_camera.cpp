@@ -1,255 +1,42 @@
 #include "hik_camera.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <opencv2/imgcodecs.hpp>
 
-void HikCamera::P2PDataCollet(const ros::TimerEvent& e)
-{
-    //抓热图
-    if (!NET_DVR_CaptureJPEGPicture_WithAppendData(user_id, 2, &struJpegWithAppendAata))
-    {
-        ROS_ERROR("NET_DVR_CaptureJPEGPicture_WithAppendData failed, error code: %d\n", NET_DVR_GetLastError());
-    }
-    else
-    {
-        if (struJpegWithAppendAata.dwP2PDataLen > 0 && struJpegWithAppendAata.pP2PDataBuff != NULL)
-        {
-            message_interface::P2PData p2pData;
-            p2pData.header.stamp = ros::Time::now();
-            p2pData.header.frame_id = "hik_tem_cam";
-            p2pData.data.resize(struJpegWithAppendAata.dwP2PDataLen);
-            memcpy(&p2pData.data[0], struJpegWithAppendAata.pP2PDataBuff, struJpegWithAppendAata.dwP2PDataLen);
-            p2p_data_pub.publish(p2pData);
-        }
-    }
+namespace { WORD bcd(float degrees) { const int value = static_cast<int>(std::lround(std::clamp(degrees, 0.0F, 359.9F) * 10)); return static_cast<WORD>(((value / 1000) << 12) | (((value / 100) % 10) << 8) | (((value / 10) % 10) << 4) | (value % 10)); } }
+
+HikCamera::HikCamera() : Node("hik_camera") {
+  profile_ = declare_parameter<std::string>("profile", "mono"); ip_ = declare_parameter<std::string>("ip", "0.0.0.0"); username_ = declare_parameter<std::string>("username", "admin"); password_ = declare_parameter<std::string>("password", ""); password_env_ = declare_parameter<std::string>("password_env", profile_ == "bispectral" ? "HIK_BISPECTRAL_PASSWORD" : "HIK_MONO_PASSWORD"); port_ = static_cast<int>(declare_parameter<int>("port", 8000)); mono_channel_ = static_cast<int>(declare_parameter<int>("mono_channel", 1)); visible_channel_ = static_cast<int>(declare_parameter<int>("visible_channel", 1)); thermal_channel_ = static_cast<int>(declare_parameter<int>("thermal_channel", 2)); jpeg_quality_ = static_cast<int>(std::clamp<int64_t>(declare_parameter<int>("jpeg_quality", 90), 0, 100));
+  const auto qos = rclcpp::SensorDataQoS();
+  mono_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>("/hik_mono/image/compressed", qos);
+  visible_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>("/hik_bispectral/visible/image/compressed", qos);
+  thermal_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>("/hik_bispectral/thermal/image/compressed", qos);
+  temperature_pub_ = create_publisher<sensor_msgs::msg::Image>("/hik_bispectral/temperature/image_raw", qos);
+  p2p_pub_ = create_publisher<message_interface::msg::P2PData>("/p2p_data", 10);
+  ptz_sub_ = create_subscription<message_interface::msg::PtzCtrl>("/ptz_ctrl", 10, std::bind(&HikCamera::on_ptz, this, std::placeholders::_1));
+  NET_DVR_Init(); NET_DVR_SetConnectTime(2000, 1); NET_DVR_SetReconnect(5000, TRUE);
+  const double rate = declare_parameter<double>("capture_rate_hz", profile_ == "bispectral" ? 5.0 : 10.0);
+  timer_ = create_wall_timer(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(1.0 / std::max(rate, 0.2))), std::bind(&HikCamera::capture, this));
 }
-
-bool HikCamera::initThemCam()
-{
-    //全屏测温参数配置
-    //输入参数
-    NET_DVR_XML_CONFIG_INPUT struInput = { 0 };
-    struInput.dwSize = sizeof(struInput);
-
-    //输出参数
-    NET_DVR_XML_CONFIG_OUTPUT struOutputParam = { 0 };
-    struOutputParam.dwSize = sizeof(struOutputParam);
-
-    //获取参数
-    char szUrl[512];
-    memset(szUrl, 0, sizeof(szUrl));
-    sprintf(szUrl, "%s", "GET /ISAPI/Thermal/channels/2/thermometry/pixelToPixelParam\r\n"); 
-
-    //不同功能对应不同URL，具体参考相应的协议文档
-    struInput.lpRequestUrl = szUrl;
-    struInput.dwRequestUrlLen = strlen(szUrl);
-
-    //获取时输入为空
-    struInput.lpInBuffer = NULL;
-    struInput.dwInBufferSize = 0;
-
-    //分配输出内存
-    char szGetOutput[8 * 1024] = { 0 };
-    struOutputParam.lpOutBuffer = szGetOutput;
-    struOutputParam.dwOutBufferSize = sizeof(szGetOutput);
-
-    //输出状态
-    char szStatusBuf[1024] = { 0 };
-    struOutputParam.lpStatusBuffer = szStatusBuf;
-    struOutputParam.dwStatusSize = sizeof(szStatusBuf);
-
-    if (!NET_DVR_STDXMLConfig(user_id, &struInput, &struOutputParam))
-    {
-        ROS_INFO("NET_DVR_STDXMLConfig failed, error code: %d\n", NET_DVR_GetLastError());
-        return false;
-    }
-    else
-    {
-        ROS_INFO("NET_DVR_STDXMLConfig successfully!\n");
-        ROS_INFO("%s\n", szGetOutput);
-    }
-
-    //设置参数
-    memset(szUrl, 0, sizeof(szUrl));
-    sprintf(szUrl, "%s", "PUT /ISAPI/Thermal/channels/2/thermometry/pixelToPixelParam\r\n");
-
-    //输入JSON数据
-    char pBuf[2 * 1024] = { 0 };
-    strcpy(pBuf, "<?xml version=\"1.0\" encoding=\"UTF - 8\"?>"
-        "<PixelToPixelParam version = \"2.0\" xmlns = \"http://www.hikvision.com/ver20/XMLSchema\">"
-        "<id>2</id>"
-        "<maxFrameRate>400</maxFrameRate>"
-        "<reflectiveEnable>false</reflectiveEnable>"
-        "<reflectiveTemperature>20.00</reflectiveTemperature>"
-        "<emissivity>0.98</emissivity>"
-        "<distance>3000</distance>"
-        "<refreshInterval>50</refreshInterval>"
-        "<distanceUnit>centimeter</distanceUnit>"
-        "<temperatureDataLength>4</temperatureDataLength>"
-        "<JpegPictureWithAppendData>"
-        "<jpegPicEnabled>true</jpegPicEnabled>"
-        "<visiblePicEnabled>true</visiblePicEnabled>"
-        "</JpegPictureWithAppendData>"
-        "</PixelToPixelParam>");//中文字符需要使用UTF-8字符集
-
-    //输入参数
-    struInput.lpInBuffer = pBuf;
-    struInput.dwInBufferSize = sizeof(pBuf);
-
-    //输出结果
-    char szOutput[8 * 1024] = { 0 };
-    struOutputParam.lpOutBuffer = szOutput;
-    struOutputParam.dwOutBufferSize = sizeof(szOutput);
-
-    //输出状态
-    char szStatusBuff[1024] = { 0 };
-    struOutputParam.lpStatusBuffer = szStatusBuff;
-    struOutputParam.dwStatusSize = sizeof(szStatusBuff);
-
-    if (!NET_DVR_STDXMLConfig(user_id, &struInput, &struOutputParam))
-    {
-        ROS_INFO("NET_DVR_STDXMLConfig failed, error code: %d\n", NET_DVR_GetLastError());
-        return false;
-    }
-    else
-    {
-        ROS_INFO("NET_DVR_STDXMLConfig successfully!\n");
-        ROS_INFO("lpOutBuffer: %s\n", szOutput);
-        ROS_INFO("lpStatusBuffer: %s\n", szStatusBuff);
-    }
-    return true;
+HikCamera::~HikCamera() { if (user_id_ >= 0) NET_DVR_Logout(user_id_); NET_DVR_Cleanup(); }
+bool HikCamera::login() {
+  const char* password = password_.empty() ? std::getenv(password_env_.c_str()) : password_.c_str();
+  if (password == nullptr || *password == '\0') { RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000, "Set the password parameter or environment variable %s", password_env_.c_str()); return false; }
+  NET_DVR_USER_LOGIN_INFO info{}; NET_DVR_DEVICEINFO_V40 device{}; info.wPort = static_cast<WORD>(port_); info.bUseAsynLogin = false;
+  std::snprintf(reinterpret_cast<char*>(info.sDeviceAddress), sizeof(info.sDeviceAddress), "%s", ip_.c_str()); std::snprintf(reinterpret_cast<char*>(info.sUserName), sizeof(info.sUserName), "%s", username_.c_str()); std::snprintf(reinterpret_cast<char*>(info.sPassword), sizeof(info.sPassword), "%s", password);
+  user_id_ = NET_DVR_Login_V40(&info, &device); if (user_id_ < 0) { RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, "Hikvision login failed: SDK error %u", NET_DVR_GetLastError()); return false; }
+  RCLCPP_INFO(get_logger(), "Connected to Hikvision camera at %s", ip_.c_str()); return true;
 }
-
-void HikCamera::PtzCtrlCallback(const message_interface::PtzCtrl::ConstPtr& msg)
-{
-    NET_DVR_PTZPOS ptz_pos;
-    unsigned int errCode;
-
-    ptz_pos.wAction = 1;
-    ptz_pos.wPanPos = dec_to_hex((*msg).Pan * 10);
-    ptz_pos.wTiltPos = dec_to_hex((*msg).Tilt * 10);
-    
-    // 不变焦
-    NET_DVR_PTZPOS Pos_judge;
-    DWORD tmp = 0;
-    NET_DVR_GetDVRConfig(0, NET_DVR_GET_PTZPOS, 0, &Pos_judge, sizeof(NET_DVR_PTZPOS), &tmp);
-
-    ptz_pos.wZoomPos = Pos_judge.wZoomPos;
-    if(!NET_DVR_SetDVRConfig(user_id,NET_DVR_SET_PTZPOS,channel,(void*)&ptz_pos,sizeof(NET_DVR_PTZPOS))){
-        errCode = NET_DVR_GetLastError();
-        ROS_ERROR("******************************************\n");
-        ROS_ERROR("errCode: %d\n",errCode);
-        ROS_ERROR("******************************************\n");
-    }
-    
+void HikCamera::publish_jpeg(const std::vector<char>& bytes, const std::string& frame, const rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& publisher) { sensor_msgs::msg::CompressedImage msg; msg.header.stamp = now(); msg.header.frame_id = frame; msg.format = "jpeg"; const auto decoded=cv::imdecode(bytes, cv::IMREAD_COLOR); if (!decoded.empty()) cv::imencode(".jpg", decoded, msg.data, {cv::IMWRITE_JPEG_QUALITY,jpeg_quality_}); else msg.data.assign(bytes.begin(), bytes.end()); publisher->publish(std::move(msg)); }
+void HikCamera::capture() {
+  if (user_id_ < 0 && !login()) return;
+  if (profile_ != "bispectral") { NET_DVR_JPEGPARA para{}; para.wPicQuality=0; DWORD size{}; if (!NET_DVR_CaptureJPEGPicture_NEW(user_id_, mono_channel_, &para, jpeg_buffer_.data(), jpeg_buffer_.size(), &size)) { RCLCPP_WARN(get_logger(), "JPEG capture failed: SDK error %u", NET_DVR_GetLastError()); return; } jpeg_buffer_.resize(size); publish_jpeg(jpeg_buffer_, "hik_mono", mono_pub_); jpeg_buffer_.resize(16*1024*1024); return; }
+  NET_DVR_JPEGPICTURE_WITH_APPENDDATA data{}; data.dwSize=sizeof(data); data.dwChannel=thermal_channel_; data.pJpegPicBuff=jpeg_buffer_.data(); data.pVisiblePicBuff=visible_buffer_.data(); data.pP2PDataBuff=p2p_buffer_.data(); if (!NET_DVR_CaptureJPEGPicture_WithAppendData(user_id_, thermal_channel_, &data)) { RCLCPP_WARN(get_logger(), "Bi-spectrum capture failed: SDK error %u", NET_DVR_GetLastError()); return; }
+  if (data.dwJpegPicLen) { std::vector<char> image(jpeg_buffer_.begin(), jpeg_buffer_.begin()+data.dwJpegPicLen); publish_jpeg(image,"hik_bispectral_thermal",thermal_pub_); }
+  if (data.dwVisiblePicLen) { std::vector<char> image(visible_buffer_.begin(), visible_buffer_.begin()+data.dwVisiblePicLen); publish_jpeg(image,"hik_bispectral_visible",visible_pub_); }
+  if (data.dwP2PDataLen) { message_interface::msg::P2PData raw; raw.header.stamp=now(); raw.header.frame_id="hik_bispectral_thermal"; raw.width=data.dwJpegPicWidth; raw.height=data.dwJpegPicHeight; raw.data.assign(p2p_buffer_.begin(), p2p_buffer_.begin()+data.dwP2PDataLen); p2p_pub_->publish(raw); if (data.dwP2PDataLen % sizeof(float) == 0 && data.dwJpegPicWidth > 0) { const size_t count=data.dwP2PDataLen/sizeof(float); const uint32_t width=data.dwJpegPicWidth; if (count % width == 0) { sensor_msgs::msg::Image image; image.header=raw.header; image.height=count/width; image.width=width; image.encoding="32FC1"; image.is_bigendian=false; image.step=width*sizeof(float); image.data=raw.data; temperature_pub_->publish(image); } } }
 }
-
-
-bool HikCamera::initHikSDK()
-{
-    NET_DVR_Init();
-    NET_DVR_USER_LOGIN_INFO struLoginInfo = {0};
-    NET_DVR_DEVICEINFO_V40  struDeviceInfoV40 = {0};
-    struLoginInfo.bUseAsynLogin = false;
-
-    struLoginInfo.wPort = port;
-    memcpy(struLoginInfo.sDeviceAddress,ip_addr.c_str(), NET_DVR_DEV_ADDRESS_MAX_LEN);
-    memcpy(struLoginInfo.sUserName, usr_name.c_str(), NAME_LEN);
-    memcpy(struLoginInfo.sPassword, password.c_str(), NAME_LEN);
-    user_id = NET_DVR_Login_V40(&struLoginInfo, &struDeviceInfoV40);
-
-    if (user_id < 0)
-    {
-        ROS_INFO("[%s] Login fail, get: %u",camera_name.c_str(), NET_DVR_GetLastError());
-        NET_DVR_Cleanup();
-        return false;
-    }
-    
-    //自己分配内存，需要大于实际数据长度
-    if (struJpegWithAppendAata.pJpegPicBuff == NULL)
-    {
-        struJpegWithAppendAata.pJpegPicBuff = new char[2 * 1024 * 1024];
-        memset(struJpegWithAppendAata.pJpegPicBuff, 0, 2 * 1024 * 1024);
-    }
-    if (struJpegWithAppendAata.pP2PDataBuff == NULL)
-    {
-        struJpegWithAppendAata.pP2PDataBuff = new char[2 * 1024 * 1024];
-        memset(struJpegWithAppendAata.pP2PDataBuff, 0, 2 * 1024 * 1024);
-    }
-    if (struJpegWithAppendAata.pVisiblePicBuff == NULL)//可见光图至少为4M
-    {
-        struJpegWithAppendAata.pVisiblePicBuff = new char[10 * 1024 * 1024];
-        memset(struJpegWithAppendAata.pVisiblePicBuff, 0, 10 * 1024 * 1024);
-    }
-
-    if(!initThemCam()){return false;}
-
-    return true;
-}
-
-
-void HikCamera::initROSIO(ros::NodeHandle& priv_node)
-{
-    /// camera parameter
-    priv_node.param("camera_frame_id", frame_id, std::string("hik_camera"));
-    priv_node.param("camera_name", camera_name,  std::string("hik_camera"));
-    priv_node.param("camera_info_url", camera_info_url, std::string(""));
-
-    priv_node.param<std::string>("ip_addr", ip_addr,"192.168.5.100");
-    ROS_INFO("[%s] ip address:\t%s", camera_name.c_str(), ip_addr.c_str());
-
-    priv_node.param<std::string>("usr_name",usr_name,"admin");
-    ROS_INFO("[%s] user name: \t%s", camera_name.c_str(), usr_name.c_str());
-
-    priv_node.param<std::string>("password",password,"ht123456");
-    ROS_INFO("[%s] password:  \t%s", camera_name.c_str(), password.c_str());
-
-    priv_node.param<int>("port",port, 8000);
-    ROS_INFO("[%s] port:      \t%d", camera_name.c_str(), port);
-
-    priv_node.param<int>("channel",channel,1);
-    ROS_INFO("[%s] channel:   \t%d", camera_name.c_str(), channel);
-
-    priv_node.param<int>("link_mode",link_mode, 0);
-    if(link_mode < 0 || link_mode >5)
-    {
-        ROS_WARN("[%s] value %d for link_mode is illegal, set to default value 0 (tcp)",camera_name.c_str(), link_mode);
-    }
-
-    std::string _mode []  = {"tcp", "udp", "multicast","rtp","rtp/rtsp", "rstp/http"};
-    ROS_INFO("[%s] link mode: \t%s", camera_name.c_str(), _mode[link_mode].c_str());
-
-    priv_node.param<int>("image_width",image_width,1280);
-    ROS_INFO("[%s] image width:  \t%d", camera_name.c_str(), image_width);
-
-    priv_node.param<int>("image_height",image_height, 720);
-    ROS_INFO("[%s] image height: \t%d", camera_name.c_str(), image_height);
-
-    // 云台控制
-    ptz_ctrl = priv_node.subscribe<message_interface::PtzCtrl>("/ptz_ctrl", 10, boost::bind(&HikCamera::PtzCtrlCallback, this, _1));
-    // 全图温度采集
-    timer = priv_node.createTimer(ros::Duration(0.1), boost::bind(&HikCamera::P2PDataCollet, this, _1));
-    p2p_data_pub = priv_node.advertise<message_interface::P2PData>("/p2p_data", 10);
-}
-
-void HikCamera::run()
-{
-    ros::NodeHandle priv_node("~");
-
-    initROSIO(priv_node);
-
-    if(initHikSDK())
-    {
-        ros::spin();
-    }
-}
-
-HikCamera::~HikCamera()
-{
-
-    if(user_id)
-    {
-        NET_DVR_Logout_V30(user_id);
-    }
-
-    NET_DVR_Cleanup();
-
-    ROS_INFO("[%s] END",camera_name.c_str());
-}
+void HikCamera::on_ptz(const message_interface::msg::PtzCtrl::SharedPtr msg) { if (user_id_ < 0 || profile_ != "bispectral") return; NET_DVR_PTZPOS position{}; position.wAction=1; position.wPanPos=bcd(msg->pan_deg); position.wTiltPos=bcd(std::clamp(msg->tilt_deg,0.0F,90.0F)); NET_DVR_PTZPOS current{}; DWORD returned{}; if (NET_DVR_GetDVRConfig(user_id_, NET_DVR_GET_PTZPOS, thermal_channel_, &current, sizeof(current), &returned)) position.wZoomPos=static_cast<WORD>(std::clamp(msg->zoom,0,65535)); if (!NET_DVR_SetDVRConfig(user_id_, NET_DVR_SET_PTZPOS, thermal_channel_, &position, sizeof(position))) RCLCPP_WARN(get_logger(), "PTZ update failed: SDK error %u", NET_DVR_GetLastError()); }
+int main(int argc, char** argv) { rclcpp::init(argc,argv); rclcpp::spin(std::make_shared<HikCamera>()); rclcpp::shutdown(); }

@@ -1,0 +1,11 @@
+hik_bispectral:
+  ros__parameters:
+    profile: bispectral
+    ip: 0.0.0.0
+    username: admin
+    password_env: HIK_BISPECTRAL_PASSWORD
+    port: 8000
+    visible_channel: 1
+    thermal_channel: 2
+    capture_rate_hz: 5.0
+    jpeg_quality: 90
