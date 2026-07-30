@@ -249,10 +249,10 @@ class Qauntum():
 
     def process_rm_report(self, data: bytes):
         if len(data) < 186: return # ensure packet is longer than 186 bytes
-        rospy.loginfo(f'{rmr}')
         
         bl = RMReport.parse_report(data[:260])
         rmr = RMReport(*bl)
+        rospy.loginfo(f'{rmr}')
 
 
     def process_quantum_scan_data(self, data: bytes):
