@@ -7,6 +7,10 @@
 /install
 /log
 /.venv
+/406mul_camera_ROS_123
+/pdf
+/bags
+*/.venv_projection
 *.local.yaml
 
 # Python caches and local tooling state
