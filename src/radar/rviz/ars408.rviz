@@ -1,0 +1,73 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 5
+      Class: rviz_default_plugins/Grid
+      Color: 100; 100; 100
+      Enabled: true
+      Name: Ground Grid
+      Plane: XY
+      Plane Cell Count: 80
+      Reference Frame: <Fixed Frame>
+    - Alpha: 0.35
+      Autocompute Intensity Bounds: true
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 120; 120; 120
+      Color Transformer: FlatColor
+      Enabled: false
+      Name: Raw ARS408
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 4
+      Size (m): 0.35
+      Style: Spheres
+      Topic:
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /ars408/points_raw
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Channel Name: speed
+      Class: rviz_default_plugins/PointCloud2
+      Color Transformer: Intensity
+      Enabled: true
+      Invert Rainbow: false
+      Name: Speed-filtered ARS408
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 6
+      Size (m): 0.45
+      Style: Spheres
+      Topic:
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /ars408/points
+      Use Fixed Frame: true
+      Use rainbow: true
+  Enabled: true
+  Global Options:
+    Background Color: 20; 20; 20
+    Fixed Frame: ars408_world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Top Down
+      Scale: 120
+      X: 0
+      Y: 35
+Window Geometry:
+  Height: 900
+  Width: 1400

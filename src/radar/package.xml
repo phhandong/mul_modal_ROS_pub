@@ -1,1 +1,23 @@
-<?xml version="1.0"?><package format="3"><name>radar</name><version>2.0.0</version><description>Raymarine Quantum radar driver.</description><maintainer email="li012@todo.todo">handong</maintainer><license>BSD-3-Clause</license><buildtool_depend>ament_python</buildtool_depend><exec_depend>rclpy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>std_msgs</exec_depend><exec_depend>cv_bridge</exec_depend><exec_depend>message_interface</exec_depend><export><build_type>ament_python</build_type></export></package>
+<?xml version="1.0"?>
+<package format="3">
+  <name>radar</name>
+  <version>2.0.0</version>
+  <description>Raymarine Quantum and Continental ARS408 radar drivers.</description>
+  <maintainer email="li012@todo.todo">handong</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>message_interface</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
